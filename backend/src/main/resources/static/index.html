@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UPI Offline</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1b1f24; --muted: #5f6b7a; --line: #e2e6ea;
+          --accent: #2456d6; --ok: #137a3a; --bad: #b42318; --warn: #8a5a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --card: #1a1f25; --text: #e7ebef; --muted: #9aa6b2; --line: #2b323a;
+            --accent: #7ea2ff; --ok: #5fd38a; --bad: #ff8a80; --warn: #f0c060; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 52rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.05rem; margin: 0 0 .75rem; }
+  .muted { color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; margin-top: 1rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  input { font: inherit; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); min-width: 0; flex: 1 1 10rem; }
+  button { font: inherit; padding: .5rem .9rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button.danger { background: transparent; color: var(--bad); border-color: var(--bad); padding: .25rem .6rem; }
+  .balance { font-size: 2rem; font-weight: 600; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: .85rem; }
+  .SUCCESS { color: var(--ok); font-weight: 600; } .FAILED { color: var(--bad); font-weight: 600; }
+  .PROCESSING { color: var(--warn); font-weight: 600; }
+  #error { color: var(--bad); min-height: 1.5em; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>UPI Offline</h1>
+  <p class="muted">Prototype. New accounts start with ₹1000 of demo money; real money comes in only through a UPI top-up (Razorpay test mode). Payments are made offline from the Android app or the mesh simulator. This page shows their outcomes.</p>
+  <p id="error" role="alert"></p>
+
+  <section id="login" class="card" hidden>
+    <h2>Log in or create an account</h2>
+    <form id="login-form" class="row">
+      <input id="username" autocomplete="username" placeholder="Username" aria-label="Username" required>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Password (8+ characters)" aria-label="Password" required>
+      <button type="submit">Log in</button>
+      <button type="button" class="secondary" id="register">Create account</button>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <section class="card">
+      <div class="row" style="justify-content: space-between">
+        <div><span class="muted">Signed in as</span> <strong id="me"></strong></div>
+        <div class="row"><a href="/mesh.html">Mesh simulator →</a><button class="secondary" id="refresh">Refresh</button><button class="secondary" id="logout">Log out</button></div>
+      </div>
+      <div class="muted" style="margin-top:.75rem">Wallet balance</div>
+      <div class="balance" id="balance"></div>
+    </section>
+
+    <section class="card">
+      <h2>Wallet: real UPI through Razorpay</h2>
+      <p class="muted">Load money with a UPI payment while online, spend it offline, and withdraw to your UPI ID. Uses Razorpay test mode once its keys are set on the server.</p>
+      <div class="row">
+        <input id="topup-amt" inputmode="decimal" placeholder="Top-up amount in ₹" aria-label="Top-up amount in rupees">
+        <button id="topup">Top up with UPI</button>
+      </div>
+      <div class="row" style="margin-top:.5rem">
+        <input id="wd-amt" inputmode="decimal" placeholder="Withdraw amount in ₹" aria-label="Withdraw amount in rupees">
+        <input id="wd-vpa" placeholder="Your UPI ID (name@bank)" aria-label="Your UPI ID">
+        <button id="withdraw">Withdraw to UPI</button>
+      </div>
+      <div class="table-wrap" style="margin-top:.75rem"><table>
+        <thead><tr><th>When</th><th>Type</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+        <tbody id="wallet"></tbody>
+      </table></div>
+    </section>
+
+    <section class="card">
+      <h2>Transactions</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>When</th><th>Direction</th><th>From → To (device)</th><th>Amount</th><th>Status</th><th>ID</th></tr></thead>
+        <tbody id="txs"></tbody>
+      </table></div>
+      <p class="muted" id="no-txs" hidden>No transactions yet. They appear here once a packet is submitted online.</p>
+    </section>
+
+    <section class="card">
+      <h2>Your devices</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Device ID</th><th>Registered</th><th>State</th><th></th></tr></thead>
+        <tbody id="devices"></tbody>
+      </table></div>
+      <p class="muted" id="no-devices" hidden>No devices yet. Register a phone from the Android app.</p>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let token = null;
+try { token = sessionStorage.getItem("token"); } catch (e) {}
+
+const rupees = minor => "₹" + (minor / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const when = iso => iso ? new Date(iso).toLocaleString() : "";
+
+async function api(method, path, body) {
+  const res = await fetch("/api/v1" + path, {
+    method,
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 401 && token) { setToken(null); show(); }
+  if (!res.ok) {
+    let msg = res.status + " " + res.statusText;
+    try { const e = await res.json(); msg = (e.error ? e.error + ": " : "") + (e.message || msg); } catch (e) {}
+    throw new Error(msg);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function setToken(t) {
+  token = t;
+  try { t ? sessionStorage.setItem("token", t) : sessionStorage.removeItem("token"); } catch (e) {}
+}
+
+function cell(tr, text, cls) {
+  const td = document.createElement("td");
+  td.textContent = text; // textContent: values come from users, never treat as HTML
+  if (cls) td.className = cls;
+  tr.appendChild(td);
+  return td;
+}
+
+function minor(input) {
+  const m = /^(\d{1,9})(?:\.(\d{1,2}))?$/.exec(input.trim());
+  if (!m) throw new Error("Amount must be like 250 or 250.50");
+  return Number(m[1]) * 100 + Number((m[2] || "0").padEnd(2, "0"));
+}
+
+function renderWallet(w) {
+  const rows = [
+    ...w.topups.map(t => ({ when: t.createdAt, type: "Top-up", amount: "+" + rupees(t.amountMinor), status: t.status,
+      url: t.status === "PENDING" ? t.paymentUrl : null, refresh: t.status === "PENDING" ? "/wallet/topups/" + t.topupId + "/refresh" : null })),
+    ...w.withdrawals.map(x => ({ when: x.createdAt, type: "Withdraw to " + x.vpa, amount: "−" + rupees(x.amountMinor),
+      status: x.status + (x.failureReason ? " (" + x.failureReason + ")" : ""), refresh: x.status === "PENDING" ? "/wallet/withdrawals/" + x.withdrawalId + "/refresh" : null })),
+  ].sort((a, b) => b.when.localeCompare(a.when));
+  $("wallet").replaceChildren(...rows.map(r => {
+    const tr = document.createElement("tr");
+    cell(tr, when(r.when)); cell(tr, r.type); cell(tr, r.amount);
+    cell(tr, r.status, r.status.startsWith("PAID") ? "SUCCESS" : r.status.startsWith("PENDING") ? "PROCESSING" : "FAILED");
+    const td = cell(tr, "");
+    if (r.url) {
+      const a = document.createElement("a"); a.href = r.url; a.target = "_blank"; a.rel = "noopener"; a.textContent = "Pay ";
+      td.appendChild(a);
+    }
+    if (r.refresh) {
+      const b = document.createElement("button"); b.className = "secondary"; b.textContent = "Check status";
+      b.onclick = () => guard(async () => { await api("POST", r.refresh); await load(); });
+      td.appendChild(b);
+    }
+    return tr;
+  }));
+}
+
+async function load() {
+  const [me, txs, devices, w] = await Promise.all([api("GET", "/me"), api("GET", "/transactions"), api("GET", "/devices/me"), api("GET", "/wallet")]);
+  renderWallet(w);
+  $("me").textContent = me.username;
+  $("balance").textContent = rupees(me.balanceMinor);
+  const mine = new Set(devices.map(d => d.deviceId));
+
+  $("txs").replaceChildren(...txs.map(t => {
+    const tr = document.createElement("tr");
+    const out = mine.has(t.senderId) && !mine.has(t.receiverId);
+    cell(tr, when(t.submittedAt));
+    cell(tr, mine.has(t.senderId) && mine.has(t.receiverId) ? "Own devices" : out ? "Paid" : "Received");
+    cell(tr, t.senderId + " → " + t.receiverId);
+    cell(tr, (t.status === "SUCCESS" ? (out ? "−" : "+") : "") + rupees(t.amountMinor)); // no sign: nothing moved
+    cell(tr, t.status + (t.failureReason ? " (" + t.failureReason + ")" : ""), t.status);
+    cell(tr, t.transactionId.slice(0, 8)).title = t.transactionId;
+    return tr;
+  }));
+  $("no-txs").hidden = txs.length > 0;
+
+  $("devices").replaceChildren(...devices.map(d => {
+    const tr = document.createElement("tr");
+    cell(tr, d.deviceId);
+    cell(tr, when(d.createdAt));
+    cell(tr, d.revokedAt ? "Revoked " + when(d.revokedAt) : "Active", d.revokedAt ? "FAILED" : "SUCCESS");
+    const td = cell(tr, "");
+    if (!d.revokedAt) {
+      const b = document.createElement("button");
+      b.className = "danger"; b.textContent = "Revoke";
+      b.onclick = () => guard(async () => {
+        if (!confirm("Revoke " + d.deviceId + "? Any payment requests it signed will be refused, including ones already sent. This can't be undone.")) return;
+        await api("DELETE", "/devices/" + encodeURIComponent(d.deviceId));
+        await load();
+      });
+      td.appendChild(b);
+    }
+    return tr;
+  }));
+  $("no-devices").hidden = devices.length > 0;
+}
+
+async function guard(fn) {
+  $("error").textContent = "";
+  try { await fn(); } catch (e) { $("error").textContent = e.message; }
+}
+
+function show() {
+  $("login").hidden = !!token;
+  $("app").hidden = !token;
+  if (token) guard(load);
+}
+
+const creds = () => ({ username: $("username").value.trim(), password: $("password").value });
+$("login-form").onsubmit = e => { e.preventDefault(); guard(async () => { setToken((await api("POST", "/auth/login", creds())).token); show(); }); };
+$("register").onclick = () => guard(async () => {
+  await api("POST", "/auth/register", creds());
+  setToken((await api("POST", "/auth/login", creds())).token);
+  show();
+});
+$("refresh").onclick = () => guard(load);
+$("topup").onclick = () => guard(async () => {
+  const t = await api("POST", "/wallet/topups", { amountMinor: minor($("topup-amt").value) });
+  if (t.paymentUrl) window.open(t.paymentUrl, "_blank", "noopener");
+  await load();
+});
+$("withdraw").onclick = () => guard(async () => {
+  const amt = minor($("wd-amt").value), vpa = $("wd-vpa").value.trim();
+  if (!confirm("Send " + rupees(amt) + " from your wallet to " + vpa + "?")) return;
+  await api("POST", "/wallet/withdrawals", { amountMinor: amt, vpa });
+  await load();
+});
+$("logout").onclick = () => guard(async () => { try { await api("POST", "/auth/logout"); } finally { setToken(null); show(); } });
+show();
+</script>
+</body>
+</html>

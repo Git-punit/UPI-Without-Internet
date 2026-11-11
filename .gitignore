@@ -1,0 +1,9 @@
+target/
+*.iml
+.idea/
+.env
+data/
+*.der
+local.properties
+.gradle/
+build/

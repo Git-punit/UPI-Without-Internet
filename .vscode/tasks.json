@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start UPI backend",
+			"type": "shell",
+			"command": "mvn -pl backend spring-boot:run",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

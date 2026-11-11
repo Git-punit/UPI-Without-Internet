@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesh Simulator</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --text: #1b1f24; --muted: #5f6b7a; --line: #e2e6ea;
+          --accent: #2456d6; --ok: #137a3a; --bad: #b42318; --warn: #8a5a00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --card: #1a1f25; --text: #e7ebef; --muted: #9aa6b2; --line: #2b323a;
+            --accent: #7ea2ff; --ok: #5fd38a; --bad: #ff8a80; --warn: #f0c060; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; } h2 { font-size: 1.05rem; margin: 0 0 .75rem; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1rem; margin-top: 1rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  input { font: inherit; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); min-width: 0; flex: 1 1 9rem; }
+  button { font: inherit; padding: .5rem .9rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .mesh { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: .6rem; }
+  .phone { border: 1px solid var(--line); border-radius: 8px; padding: .6rem; background: var(--bg); }
+  .phone strong { display: block; }
+  .phone .count { font-size: 1.5rem; font-weight: 600; }
+  .net { font-size: .8rem; color: var(--ok); } .nonet { font-size: .8rem; color: var(--muted); }
+  #log { font: 13px/1.45 ui-monospace, monospace; white-space: pre-wrap; max-height: 22rem; overflow-y: auto; margin: 0; }
+  #error { color: var(--bad); min-height: 1.5em; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Mesh simulator</h1>
+  <p class="muted">Simulates a payment travelling phone to phone with no internet until a "bridge" phone gets online and uploads it.
+    The phones are simulated, but the crypto and the backend are real. The sender's key is generated in this browser, the packet is signed
+    and encrypted here in the same format the Android app uses, and the backend verifies it exactly as it would a phone's. <a href="/">← Dashboard</a></p>
+  <p id="error" role="alert"></p>
+
+  <section class="card" id="need-login" hidden>
+    <p>Log in on the <a href="/">dashboard</a> first, then come back.</p>
+  </section>
+
+  <div id="sim" hidden>
+    <section class="card">
+      <h2>1. Sender phone (offline)</h2>
+      <div class="row">
+        <input id="phone-id" aria-label="Virtual phone device ID">
+        <button id="enrol">Create &amp; register virtual phone</button>
+      </div>
+      <p class="muted" id="phone-state">No phone yet. Registering needs internet; after that, paying works offline.</p>
+      <div class="row">
+        <input id="to" aria-label="Receiver device ID" placeholder="Receiver's device ID (e.g. bob-phone)" value="bob-phone">
+        <input id="amount" aria-label="Amount in rupees" placeholder="Amount in ₹" inputmode="decimal" value="100">
+        <button id="pay" disabled>Sign &amp; seal payment</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2. The mesh</h2>
+      <p class="muted">Bluetooth range: sender ↔ stranger-1 ↔ stranger-2 ↔ stranger-3 ↔ bridge-A, and stranger-2 ↔ bridge-B.
+        Each gossip round, every phone copies its packets to the phones in range. A packet stops spreading after 5 hops.</p>
+      <div class="mesh" id="mesh"></div>
+      <div class="row" style="margin-top:.75rem">
+        <button id="gossip">Run gossip round</button>
+        <button id="flush">Bridges get internet → upload</button>
+        <button class="secondary" id="reset">Reset mesh</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const MAX_HOPS = 5;
+
+let token = null, username = null;
+try { token = sessionStorage.getItem("token"); } catch (e) {}
+
+// shortcut: the virtual phone's key lives only in this tab's memory; reloading means enrolling a new phone.
+let phone = null;      // { id, keys }
+let backendKey = null; // CryptoKey for RSA-OAEP
+
+const PHONES = [
+  { id: "sender", internet: false }, { id: "stranger-1", internet: false }, { id: "stranger-2", internet: false },
+  { id: "stranger-3", internet: false }, { id: "bridge-A", internet: true }, { id: "bridge-B", internet: true },
+];
+const RANGE = { "sender": ["stranger-1"], "stranger-1": ["sender", "stranger-2"],
+  "stranger-2": ["stranger-1", "stranger-3", "bridge-B"], "stranger-3": ["stranger-2", "bridge-A"],
+  "bridge-A": ["stranger-3"], "bridge-B": ["stranger-2"] };
+let held = {}; // phoneId -> Map(transactionId -> { envelope, hops })
+
+function log(msg) { $("log").textContent = new Date().toLocaleTimeString() + "  " + msg + "\n" + $("log").textContent; }
+
+async function api(method, path, body) {
+  const res = await fetch("/api/v1" + path, {
+    method, headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = res.status === 204 ? null : await res.json().catch(() => null);
+  return { status: res.status, data };
+}
+
+function render() {
+  $("mesh").replaceChildren(...PHONES.map(p => {
+    const div = document.createElement("div");
+    div.className = "phone";
+    const name = document.createElement("strong"); name.textContent = p.id;
+    const net = document.createElement("span");
+    net.className = p.internet ? "net" : "nonet"; net.textContent = p.internet ? "can get internet" : "offline";
+    const count = document.createElement("div"); count.className = "count"; count.textContent = held[p.id].size;
+    const label = document.createElement("div"); label.className = "muted"; label.textContent = "packets carried";
+    div.append(name, net, count, label);
+    return div;
+  }));
+}
+
+function reset() { held = Object.fromEntries(PHONES.map(p => [p.id, new Map()])); render(); }
+
+// Must match PaymentInstruction.canonicalBytes() in the Java protocol module byte for byte.
+const instant = sec => new Date(sec * 1000).toISOString().replace(".000Z", "Z");
+function canonical(i) {
+  return enc.encode(`v=1\nid=${i.id}\nfrom=${i.from}\nto=${i.to}\namount=${i.amount}\ncurrency=INR\ncreated=${instant(i.created)}\nexpires=${instant(i.expires)}\n`);
+}
+
+// Same as EnvelopeCrypto.seal(): RSA-PSS sign, AES-256-GCM with the ids as associated data, RSA-OAEP key wrap.
+async function seal(i) {
+  const body = canonical(i);
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, phone.keys.privateKey, body));
+  const plain = new Uint8Array(4 + body.length + sig.length);
+  new DataView(plain.buffer).setUint32(0, body.length);
+  plain.set(body, 4); plain.set(sig, 4 + body.length);
+  const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, tagLength: 128, additionalData: enc.encode(`upi-offline/v1|${i.id}|${i.from}|${i.to}`) }, aes, plain);
+  const wrapped = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, backendKey, await crypto.subtle.exportKey("raw", aes));
+  return { protocolVersion: 1, transactionId: i.id, senderId: i.from, receiverId: i.to,
+           nonce: b64(iv), encryptedKey: b64(wrapped), ciphertext: b64(ct) };
+}
+
+async function enrol() {
+  const id = $("phone-id").value.trim();
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(id)) throw new Error("Device ID: 1–64 letters, digits, . _ -");
+  const keys = await crypto.subtle.generateKey(
+    { name: "RSA-PSS", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" }, true, ["sign", "verify"]);
+  const proof = await crypto.subtle.sign({ name: "RSA-PSS", saltLength: 32 }, keys.privateKey,
+    enc.encode(`upi-offline/register/v1|${id}|${username}`));
+  const r = await api("POST", "/devices/register",
+    { deviceId: id, publicKey: b64(await crypto.subtle.exportKey("spki", keys.publicKey)), proof: b64(proof) });
+  if (r.status !== 201) throw new Error((r.data?.error || r.status) + ": " + (r.data?.message || "registration failed"));
+  const k = await (await fetch("/api/v1/keys/backend")).json();
+  backendKey = await crypto.subtle.importKey("spki", Uint8Array.from(atob(k.publicKey), c => c.charCodeAt(0)),
+    { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
+  phone = { id, keys };
+  $("phone-state").textContent = `Phone ${id} registered to ${username}. It now has the backend key cached, so it can pay offline.`;
+  $("pay").disabled = false; $("enrol").disabled = true;
+  log(`Registered virtual phone ${id} (key made in this browser; the backend checked the proof)`);
+}
+
+async function pay() {
+  const to = $("to").value.trim(), amt = $("amount").value.trim();
+  const m = /^(\d{1,9})(?:\.(\d{1,2}))?$/.exec(amt);
+  if (!m) throw new Error("Amount must be like 250 or 250.50");
+  const amount = Number(m[1]) * 100 + Number((m[2] || "0").padEnd(2, "0"));
+  if (amount <= 0) throw new Error("Amount must be positive");
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(to) || to === phone.id) throw new Error("Enter another phone's device ID");
+  const created = Math.floor(Date.now() / 1000);
+  const envelope = await seal({ id: crypto.randomUUID(), from: phone.id, to, amount, created, expires: created + 12 * 3600 });
+  held["sender"].set(envelope.transactionId, { envelope, hops: 0 });
+  render();
+  log(`Sealed ₹${amt} to ${to} (tx ${envelope.transactionId.slice(0, 8)}). Strangers can carry it but can't read or change it. NOT paid yet.`);
+}
+
+function gossip() {
+  let copies = 0;
+  const snapshot = PHONES.map(p => [p.id, [...held[p.id].values()]]);
+  for (const [from, packets] of snapshot) for (const pkt of packets) {
+    if (pkt.hops >= MAX_HOPS) continue;
+    for (const to of RANGE[from]) {
+      if (held[to].has(pkt.envelope.transactionId)) continue;
+      held[to].set(pkt.envelope.transactionId, { envelope: pkt.envelope, hops: pkt.hops + 1 });
+      copies++;
+    }
+  }
+  render();
+  log(copies ? `Gossip round: ${copies} Bluetooth hand-offs` : "Gossip round: nothing new to pass on");
+}
+
+async function flush() {
+  const uploads = PHONES.filter(p => p.internet).flatMap(p => [...held[p.id].values()].map(pkt => ({ bridge: p.id, pkt })));
+  if (!uploads.length) return log("No bridge carries a packet yet. Run more gossip rounds.");
+  log(`${uploads.length} upload(s) at the same moment from ${[...new Set(uploads.map(u => u.bridge))].join(", ")}…`);
+  // In parallel on purpose: two bridges delivering the same packet at once must still settle it only once.
+  const results = await Promise.all(uploads.map(u => api("POST", "/transactions", u.pkt.envelope).then(r => ({ ...u, r }))));
+  for (const { bridge, pkt, r } of results) {
+    const tx = pkt.envelope.transactionId.slice(0, 8);
+    const d = r.data || {};
+    const what = r.status === 201 ? `SETTLED → ${d.status}${d.failureReason ? " (" + d.failureReason + ")" : ""}`
+      : r.status === 200 ? `already settled, nothing charged again (${d.status})`
+      : r.status === 202 ? "delivered (a stranger relay sees no details)"
+      : `${d.error || r.status}: ${d.message || ""}`;
+    log(`${bridge} uploaded tx ${tx} after ${pkt.hops} hop(s): ${what}`);
+    held[bridge].delete(pkt.envelope.transactionId);
+  }
+  render();
+}
+
+async function guard(fn) {
+  $("error").textContent = "";
+  try { await fn(); } catch (e) { $("error").textContent = e.message; }
+}
+
+async function start() {
+  if (!token) { $("need-login").hidden = false; return; }
+  const me = await api("GET", "/me");
+  if (me.status !== 200) { $("need-login").hidden = false; return; }
+  username = me.data.username;
+  $("phone-id").value = `${username}-sim-${Math.random().toString(36).slice(2, 6)}`;
+  $("sim").hidden = false;
+  reset();
+  log(`Logged in as ${username}. Uploads below use this login: as the sender you see the outcome; a real stranger bridge would get 202 and no details.`);
+}
+
+$("enrol").onclick = () => guard(enrol);
+$("pay").onclick = () => guard(pay);
+$("gossip").onclick = () => guard(async () => gossip());
+$("flush").onclick = () => guard(flush);
+$("reset").onclick = () => { reset(); log("Mesh cleared"); };
+guard(start);
+</script>
+</body>
+</html>
